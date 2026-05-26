@@ -2,11 +2,14 @@
 
 > 시각장애인과 저시력자를 위한 온디바이스 AI 기반 실시간 상품 인식 및 음성 안내 Android 앱
 
-<p align="center">
-  <a href="https://www.notion.so/8ac441f66d78821492c2019c4fc233cf?pvs=1">
-    <img src="https://img.shields.io/badge/Notion%20Project%20Page-View%20Details-7C3AED?style=for-the-badge&logo=notion&logoColor=white" alt="Notion Project Page" />
-  </a>
-</p>
+<table align="center">
+  <tr>
+    <td align="center" width="680">
+      <a href="https://www.notion.so/8ac441f66d78821492c2019c4fc233cf?pvs=1"><b>📘 Notion Project Page</b></a><br />
+      <sub>프로젝트 상세 문서 · 구현 과정 · 역할 정리 보기</sub>
+    </td>
+  </tr>
+</table>
 
 <p align="center">
   <img src="./assets/grabit-detection-demo.jpg" width="32%" alt="GrabIT 상품 인식 화면" />
