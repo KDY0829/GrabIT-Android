@@ -1,47 +1,140 @@
-# GrabIT (Android App)
+# GrabIT Android
 
-시각장애인 및 저시력자를 위한 온디바이스 AI 기반 실시간 쇼핑 어시스턴트 애플리케이션입니다.
+> 시각장애인과 저시력자를 위한 온디바이스 AI 기반 실시간 상품 인식 및 음성 안내 Android 앱
 
-## 📱 주요 기능
-* **실시간 객체 인식 (Object Detection)**: YOLOX-Nano 모델을 TFLite로 변환하여 기기 내(On-Device)에서 빠르고 정확하게 진열대의 상품을 인식합니다.
-* **손 추적 (Hand Tracking)**: MediaPipe Hands를 활용하여 사용자의 손가락 끝(Index Finger)과 상품 간의 거리를 계산합니다.
-* **음성 피드백 (Voice Flow)**: STT(Speech-to-Text)와 TTS(Text-to-Speech)를 활용하여 화면을 보지 않고도 음성으로 앱을 제어하고 상품 위치를 안내받을 수 있습니다.
-* **비프음 피드백 (Beep Player)**: 손이 목표 상품에 가까워질수록 비프음 주기를 짧게 하여 직관적인 위치 안내를 제공합니다.
-* **검색 기록 (Search History)**: Room Database를 사용하여 최근 찾은 상품 기록을 로컬에 저장하고 관리합니다.
+<p align="center">
+  <img src="./assets/grabit-detection-demo.jpg" width="32%" alt="GrabIT 상품 인식 화면" />
+  <img src="./assets/grabit-service-overview.png" width="58%" alt="GrabIT 서비스 소개 화면" />
+</p>
 
-## 🛠 기술 스택
-* **Language**: Kotlin
-* **Architecture**: MVVM
-* **AI/ML**: TensorFlow Lite (YOLOX-Nano), MediaPipe Hands
-* **Database**: Room Database
-* **Network**: Retrofit2, OkHttp3
-* **Media**: CameraX, TextToSpeech, SpeechRecognizer
+## ✨ Highlights
 
-## 🚀 실행 방법
-1. Android Studio에서 `grabit-android` 폴더를 엽니다.
-2. Gradle Sync를 완료합니다.
-3. 카메라 하드웨어가 필요하므로 가급적 **실제 안드로이드 기기**를 연결하여 빌드 및 실행합니다.
+| 구분 | 내용 |
+|---|---|
+| 문제 | 시각장애인과 저시력자가 매장에서 원하는 상품을 직접 찾기 어려움 |
+| 해결 | 온디바이스 객체 탐지 + 손 추적 + 음성/비프음 안내 |
+| 담당 | YOLOX-Nano 학습, TFLite/LiteRT 변환, Android 연동, 접근성 UX 흐름 설계 |
+| 결과 | 실시간 상품 인식과 손 위치 기반 안내 기능 구현 |
 
-# GrabIT Synonym & Dimension API
+---
 
-GrabIT 앱의 '유사어 검색' 및 '상품 규격(크기) 정보'를 제공하는 백엔드 서버입니다. 동의어 매칭과 자연어 처리를 위해 Node.js 및 Python(E5 임베딩) 서버를 함께 구동합니다.
+## 1. 프로젝트 개요
 
-## ⚙️ 주요 기능
-* **유사어 검색 (Synonym Search)**: 사용자가 말한 단어(예: "까까")를 앱에 등록된 정식 상품명(예: "과자")으로 매핑합니다.
-* **자연어 임베딩 (E5 Service)**: Python 기반의 `e5-service`를 통해 텍스트 임베딩을 생성하고 코사인 유사도를 계산하여 가장 가까운 상품군을 찾습니다.
-* **상품 규격 제공**: 인식된 상품의 실제 크기 데이터(가로, 세로, 높이 등)를 앱에 전달하여 화면 상의 거리 비례를 계산하는 데 도움을 줍니다.
+GrabIT은 시각장애인 및 저시력자가 매장 진열대 앞에서 원하는 상품을 더 쉽게 찾을 수 있도록 돕는 Android 애플리케이션입니다.
 
-## 🛠 기술 스택
-* **Backend**: Node.js, Express
-* **AI/NLP**: Python, FastAPI, intfloat/multilingual-e5-small
-* **Database**: MongoDB
-* **Infra**: Docker, Docker Compose
+카메라로 상품을 인식하고, 사용자의 손가락 위치를 추적하며, 음성 안내와 비프음 피드백을 통해 화면을 보기 어려운 상황에서도 목표 상품의 위치를 직관적으로 안내하는 데 초점을 맞췄습니다.
 
-## 🚀 실행 방법 (Docker Compose 활용)
-1. 루트 폴더에서 아래 명령어를 실행하여 컨테이너를 빌드하고 실행합니다.
-   `docker-compose up --build -d`
-2. Node.js 서버는 `3000` 포트, E5 파이썬 서버는 `8000` 포트로 실행됩니다.
-3. 초기 데이터 적재가 필요한 경우 아래 스크립트를 실행합니다.
-   `node seed.js`
-   `node seed-dimensions.js`
+---
 
+## 2. 사용자 시나리오
+
+<p align="center">
+  <img src="./assets/grabit-user-scenario.png" width="80%" alt="GrabIT 사용자 시나리오" />
+</p>
+
+```text
+상품명 음성 입력
+  → 유사어 검색 / 상품군 매칭
+  → 카메라 기반 실시간 상품 인식
+  → 손가락 위치 추적
+  → 목표 상품과 손 위치 거리 계산
+  → 음성 안내 + 비프음 피드백
+```
+
+---
+
+## 3. 주요 기능
+
+| 기능 | 설명 |
+|---|---|
+| 실시간 상품 인식 | YOLOX-Nano 모델을 TensorFlow Lite로 변환해 온디바이스 추론 수행 |
+| 손 추적 | MediaPipe Hands로 손가락 끝 좌표를 추적 |
+| 음성 제어 | STT / TTS 기반으로 화면을 보지 않고 앱 제어 |
+| 비프음 피드백 | 목표 상품과 가까워질수록 비프음 간격을 짧게 조절 |
+| 검색 기록 | Room Database 기반 최근 검색 기록 저장 |
+| 유사어 검색 | E5 embedding 기반으로 구어체 표현을 정식 상품명과 매칭 |
+| 상품 규격 API | 상품 크기 정보를 앱에 전달해 거리 계산 보조 |
+
+---
+
+## 4. My Role
+
+- YOLOX-Nano 기반 상품 인식 모델 학습
+- PyTorch 모델을 TensorFlow Lite / LiteRT 배포 형태로 변환
+- Android 앱 내 온디바이스 추론 흐름 연결
+- MediaPipe 손 추적 결과와 상품 박스 간 거리 기반 피드백 설계
+- STT/TTS 기반 접근성 UX 흐름 정리
+- Node.js / FastAPI 기반 유사어 검색 및 상품 규격 API 연동
+
+---
+
+## 5. Tech Stack
+
+| 영역 | 기술 |
+|---|---|
+| Android | Kotlin, Android Studio |
+| Architecture | MVVM |
+| On-Device AI | YOLOX-Nano, TensorFlow Lite, LiteRT |
+| Vision | CameraX, MediaPipe Hands |
+| Voice | SpeechRecognizer, TextToSpeech |
+| Local DB | Room Database |
+| Backend | Node.js, Express, FastAPI |
+| NLP | intfloat/multilingual-e5-small, cosine similarity |
+| Database | MongoDB |
+| Network | Retrofit2, OkHttp3 |
+| Infra | Docker, Docker Compose |
+
+---
+
+## 6. System Flow
+
+```text
+Android CameraX
+  → YOLOX-Nano TFLite inference
+  → 상품 bounding box 추출
+  → MediaPipe Hands 손가락 좌표 추적
+  → 목표 상품과 손 위치 거리 계산
+  → TTS / Beep feedback
+```
+
+---
+
+## 7. Backend API
+
+GrabIT은 앱 내부 모델 추론 외에도 상품명 매칭과 상품 규격 정보 제공을 위해 백엔드 API를 함께 사용합니다.
+
+| 서버 | 역할 |
+|---|---|
+| Node.js API | 상품 정보, 유사어 검색 요청, 규격 정보 제공 |
+| FastAPI E5 Service | 텍스트 임베딩 생성 및 유사도 계산 |
+| MongoDB | 상품명, 유사어, 규격 데이터 저장 |
+
+---
+
+## 8. How to Run
+
+### Android App
+
+```bash
+# Android Studio에서 프로젝트 열기
+# Gradle Sync 후 실제 Android 기기에서 실행 권장
+```
+
+### Backend
+
+```bash
+docker-compose up --build -d
+node seed.js
+node seed-dimensions.js
+```
+
+---
+
+## 9. Repository
+
+```text
+app/                 Android app source
+server/              Node.js API server
+e5-service/          FastAPI embedding service
+docker-compose.yml   backend service orchestration
+```
