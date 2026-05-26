@@ -12,6 +12,10 @@
 </table>
 
 <p align="center">
+  <video src="./assets/Grabit.mp4" width="32%" controls></video>
+</p>
+
+<p align="center">
   <img src="./assets/grabit-detection-demo.jpg" width="32%" alt="GrabIT 상품 인식 화면" />
   <img src="./assets/grabit-service-overview.png" width="58%" alt="GrabIT 서비스 소개 화면" />
 </p>
