@@ -1,6 +1,6 @@
 # GrabIT Android
 
-> 시각장애인과 저시력자를 위한 온디바이스 AI 기반 실시간 상품 인식 및 음성 안내 Android 앱
+> 온디바이스 AI 기반 실시간 상품 인식 및 음성 안내 Android 앱
 
 <table align="center">
   <tr>
@@ -11,14 +11,12 @@
   </tr>
 </table>
 
-<p align="center">
-  <a href="https://github.com/KDY0829/GrabIT-Android/raw/master/assets/Grabit.mp4">
-    <img src="./assets/grabit-detection-demo.jpg" width="32%" alt="GrabIT 실행 영상" />
-  </a><br />
-  <sub>▶ 이미지를 클릭하면 실행 영상을 볼 수 있습니다.</sub>
-</p>
+## 🎬 Demo Video
+
+https://github.com/user-attachments/assets/4c5dc1ac-ce55-4b0b-b4d7-75098fa5151e
 
 <p align="center">
+  <img src="./assets/grabit-detection-demo.jpg" width="32%" alt="GrabIT 상품 인식 화면" />
   <img src="./assets/grabit-service-overview.png" width="58%" alt="GrabIT 서비스 소개 화면" />
 </p>
 
@@ -26,7 +24,7 @@
 
 | 구분 | 내용 |
 |---|---|
-| 문제 | 시각장애인과 저시력자가 매장에서 원하는 상품을 직접 찾기 어려움 |
+| 문제 | 매장 진열대에서 원하는 상품을 직접 찾기 어려움 |
 | 해결 | 온디바이스 객체 탐지 + 손 추적 + 음성/비프음 안내 |
 | 담당 | YOLOX-Nano 학습, TFLite/LiteRT 변환, Android 연동, 접근성 UX 흐름 설계 |
 | 결과 | 실시간 상품 인식과 손 위치 기반 안내 기능 구현 |
@@ -35,9 +33,9 @@
 
 ## 1. 프로젝트 개요
 
-GrabIT은 시각장애인 및 저시력자가 매장 진열대 앞에서 원하는 상품을 더 쉽게 찾을 수 있도록 돕는 Android 애플리케이션입니다.
+GrabIT은 매장 진열대 앞에서 원하는 상품을 더 쉽게 찾을 수 있도록 돕는 Android 애플리케이션입니다.
 
-카메라로 상품을 인식하고, 사용자의 손가락 위치를 추적하며, 음성 안내와 비프음 피드백을 통해 화면을 보기 어려운 상황에서도 목표 상품의 위치를 직관적으로 안내하는 데 초점을 맞췄습니다.
+카메라로 상품을 인식하고, 사용자의 손가락 위치를 추적하며, 음성 안내와 비프음 피드백을 통해 목표 상품의 위치를 직관적으로 안내하는 데 초점을 맞췄습니다.
 
 ---
 
