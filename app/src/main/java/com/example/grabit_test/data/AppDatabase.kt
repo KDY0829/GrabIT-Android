@@ -11,7 +11,7 @@ import com.example.grabit_test.data.product.ProductDimensionDao
 
 @Database(
     entities = [SearchHistoryItem::class, ProductDimension::class],
-    version = 2,
+    version = 3,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {

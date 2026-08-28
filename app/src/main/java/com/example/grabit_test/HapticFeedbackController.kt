@@ -23,6 +23,10 @@ class HapticFeedbackController(context: Context) {
         vibrate(durationMs, VibrationEffect.DEFAULT_AMPLITUDE)
     }
 
+    fun playCandidateDetected() {
+        vibrate(durationMs = 120L, amplitude = 80)
+    }
+
     fun playTargetLock() {
         vibrate(durationMs = 300L, amplitude = 255)
     }

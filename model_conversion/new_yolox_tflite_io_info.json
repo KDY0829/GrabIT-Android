@@ -1,0 +1,59 @@
+{
+  "model_path": "app\\src\\main\\assets\\yolox_nano_retail_640_balanced_split_fp16.tflite",
+  "file_size_bytes": 4586100,
+  "file_size_mb": 4.374,
+  "inputs": [
+    {
+      "name": "images",
+      "index": 0,
+      "shape": [
+        1,
+        640,
+        640,
+        3
+      ],
+      "shape_signature": [
+        1,
+        640,
+        640,
+        3
+      ],
+      "dtype": "float32",
+      "quantization": [
+        0.0,
+        0.0
+      ],
+      "quantization_parameters": {
+        "scales": [],
+        "zero_points": [],
+        "quantized_dimension": 0
+      }
+    }
+  ],
+  "outputs": [
+    {
+      "name": "Identity",
+      "index": 630,
+      "shape": [
+        1,
+        8400,
+        48
+      ],
+      "shape_signature": [
+        1,
+        8400,
+        48
+      ],
+      "dtype": "float32",
+      "quantization": [
+        0.0,
+        0.0
+      ],
+      "quantization_parameters": {
+        "scales": [],
+        "zero_points": [],
+        "quantized_dimension": 0
+      }
+    }
+  ]
+}

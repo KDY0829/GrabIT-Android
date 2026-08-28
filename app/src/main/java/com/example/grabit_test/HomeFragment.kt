@@ -85,9 +85,12 @@ class HomeFragment : Fragment() {
     private val latestHandsResult = AtomicReference<HandLandmarkerResult?>(null)
 
     private var classLabels: List<String> = emptyList()
+    private var hasLoggedYoloxClassMismatch = false
 
     enum class SearchState { IDLE, SEARCHING, LOCKED }
     private var searchState = SearchState.IDLE
+    private val guidanceStateMachine = GuidanceStateMachine()
+    private val verifyHeldItemFlow = VerifyHeldItemFlow()
     private var frozenBox: OverlayView.DetectionBox? = null
     private var frozenImageWidth = 0
     private var frozenImageHeight = 0
@@ -101,6 +104,10 @@ class HomeFragment : Fragment() {
     private val PENDING_LOCK_MAX_MISS_FRAMES = 12
     /** 이전 박스와 IoU가 이 값 이상이면 같은 타겟으로 인정 (타일링/노이즈로 박스가 살짝 흔들려도 유지) */
     private val PENDING_LOCK_IOU_THRESHOLD = 0.2f
+    private val CANDIDATE_FEEDBACK_COOLDOWN_MS = 5000L
+    @Volatile private var lastCandidateFeedbackTimeMs = 0L
+    private val TARGET_LOCK_STABILITY_MS = 1000L
+    private val TARGET_LOCK_MAX_MOVEMENT_NORM = 0.03f
     private var pendingLockBox: OverlayView.DetectionBox? = null
     private var pendingLockCount = 0
     private var pendingLockMissCount = 0
@@ -123,9 +130,7 @@ class HomeFragment : Fragment() {
     private val currentTargetLabel = AtomicReference<String>("")
 
     private var lastDirectionGuidanceTime = 0L
-    private var lastActionGuidanceTime = 0L
-    private val DIRECTION_GUIDANCE_COOLDOWN_MS = 4000L   // 왼쪽/오른쪽 (4초)
-    private val ACTION_GUIDANCE_COOLDOWN_MS = 10000L    // "손을 뻗어 확인해보세요" (10초)
+    private val DIRECTION_GUIDANCE_COOLDOWN_MS = 4000L
     private val SEARCH_PING_INTERVAL_MS = 12000L  // 탐색 침묵 12초 시 핑 안내
     private var lastSearchPingTime = 0L
     /** SEARCHING에서 5초 이상 미탐지 시 "상품이 보이지 않습니다" 안내 */
@@ -155,6 +160,10 @@ class HomeFragment : Fragment() {
     private var lastTier1NoMatchTimeMs = 0L
     private var lastTier2NoMatchTimeMs = 0L
     private var searchFrameCountInTier3 = 0
+    private val YOLOX_DIAG_LOG_INTERVAL_MS = 1000L
+    private var lastYoloxParseDiagLogMs = 0L
+    private var lastYoloxMatchDiagLogMs = 0L
+    private var lastYoloxSearchDiagLogMs = 0L
     /** 락 시 타일링으로 탐지했으면 true. 락 해제 시 SEARCHING에서 tier 1부터 재시작 */
     private var useTilingWhenLocked = false
     /** 락 시 타일링이었으면 사용한 그리드(2 또는 3). 검증 시 동일 그리드 사용 */
@@ -162,10 +171,11 @@ class HomeFragment : Fragment() {
 
     private var sttManager: STTManager? = null
     private var ttsManager: TTSManager? = null
-    private var ttsGuidanceQueue: TtsPriorityQueue? = null
+    private lateinit var ttsFeedbackController: TtsFeedbackController
     private lateinit var beepFeedbackController: BeepFeedbackController
     private lateinit var hapticFeedbackController: HapticFeedbackController
     private var speakerVerificationManager: SpeakerVerificationManager? = null
+    private var voiceActivityDetector: VoiceActivityDetector? = null
     private var isSpeakerGateInProgress = false
     private var proximityModeActive = false
     private var voiceFlowController: VoiceFlowController? = null
@@ -370,7 +380,7 @@ class HomeFragment : Fragment() {
         stopPositionAnnounce()
         try { stopCamera() } catch (_: Exception) {}
         sttManager?.stopListening()
-        ttsManager?.stop()
+        ttsFeedbackController.stop()
     }
 
     override fun onStop() {
@@ -379,7 +389,7 @@ class HomeFragment : Fragment() {
         stopPositionAnnounce()
         try { stopCamera() } catch (_: Exception) {}
         sttManager?.stopListening()
-        ttsManager?.stop()
+        ttsFeedbackController.stop()
     }
 
     override fun onDestroyView() {
@@ -389,7 +399,7 @@ class HomeFragment : Fragment() {
         gpuDelegate?.close()
         gyroManager.stopTracking()
         sttManager?.release()
-        ttsManager?.release()
+        ttsFeedbackController.release()
         beepFeedbackController.release()
         speakerVerificationManager?.close()
         speakerVerificationManager = null
@@ -414,7 +424,7 @@ class HomeFragment : Fragment() {
             Toast.makeText(requireContext(), "준비 중입니다. 잠시 후 다시 시도해주세요.", Toast.LENGTH_SHORT).show()
             return
         }
-        ttsManager?.stop()
+        ttsFeedbackController.stop()
         sttManager?.cancelListening()
         voiceFlowController?.startProductNameInput()
     }
@@ -432,7 +442,7 @@ class HomeFragment : Fragment() {
         if (!canSkipToVoice) return
         if (!inTouchConfirm && voiceFlowController == null) return
         pendingSearchTarget = null
-        ttsManager?.stop()
+        ttsFeedbackController.stop()
         sttManager?.cancelListening()
         if (inTouchConfirm) {
             startSpeakerVerifiedStt("product_search_touch_confirm_volume_skip")
@@ -442,6 +452,8 @@ class HomeFragment : Fragment() {
     }
 
     private fun startSpeakerVerifiedStt(reason: String) {
+        val gateRequestAtMs = System.currentTimeMillis()
+        Log.i(TAG, "VOICE_DIAG_STT_GATE_REQUEST reason=$reason inProgress=$isSpeakerGateInProgress")
         if (isSpeakerGateInProgress) {
             Log.i(
                 SpeakerVerificationConfig.LOG_TAG,
@@ -455,51 +467,80 @@ class HomeFragment : Fragment() {
             SpeakerVerificationConfig.LOG_TAG,
             "SV_STT_GATE_REQUEST reason=$reason registered=$registered"
         )
-        if (verifier == null || !verifier.hasVoiceprint()) {
-            Log.i(
-                SpeakerVerificationConfig.LOG_TAG,
-                "SV_STT_GATE registered=false action=fallback_stt reason=$reason"
-            )
-            sttManager?.startListening()
-            return
-        }
         isSpeakerGateInProgress = true
         setSttGateUiEnabled(false)
-        viewLifecycleOwner.lifecycleScope.launch {
-            try {
-                val result = verifier.verifyFromMicrophone(SpeakerVerificationConfig.DEFAULT_THRESHOLD)
-                if (result.accepted) {
+
+        Log.i(TAG, "VOICE_DIAG_STT_GATE_BEEP_START reason=$reason elapsedMs=${System.currentTimeMillis() - gateRequestAtMs}")
+        beepFeedbackController.playListeningStart {
+            Log.i(TAG, "VOICE_DIAG_STT_GATE_BEEP_DONE reason=$reason elapsedMs=${System.currentTimeMillis() - gateRequestAtMs}")
+            if (verifier == null || !registered) {
+                Log.i(
+                    SpeakerVerificationConfig.LOG_TAG,
+                    "SV_STT_GATE registered=false action=fallback_stt_without_extra_beep reason=$reason"
+                )
+                isSpeakerGateInProgress = false
+                setSttGateUiEnabled(true)
+                sttManager?.startListeningWithoutBeep()
+                return@playListeningStart
+            }
+
+            val vad = voiceActivityDetector
+            if (vad == null) {
+                isSpeakerGateInProgress = false
+                setSttGateUiEnabled(true)
+                sttManager?.startListeningWithoutBeep()
+                return@playListeningStart
+            }
+
+            viewLifecycleOwner.lifecycleScope.launch {
+                try {
+                    val capture = vad.recordAndAnalyze(SpeakerVerificationConfig.RECORD_MILLIS)
+                    val vadResult = capture.result
                     Log.i(
-                        SpeakerVerificationConfig.LOG_TAG,
-                        "SV_STT_GATE accepted=true action=startSpeechRecognizer reason=$reason"
+                        TAG,
+                        "VAD_GATE reason=$reason speech=${vadResult.isSpeech} vadReason=${vadResult.reason} " +
+                            "rmsDb=${"%.1f".format(vadResult.rmsDb)} speechFrameRatio=${"%.2f".format(vadResult.speechFrameRatio)} " +
+                            "capturedSamples=${vadResult.capturedSamples} elapsedMs=${System.currentTimeMillis() - gateRequestAtMs}"
                     )
-                    val rootView = view
-                    if (rootView == null) {
+                    if (!vadResult.isSpeech) {
+                        voiceFlowController?.notifySttEnded()
                         isSpeakerGateInProgress = false
                         setSttGateUiEnabled(true)
+                        Toast.makeText(requireContext(), "\uB9D0\uC18C\uB9AC\uAC00 \uAC10\uC9C0\uB418\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4. \uB2E4\uC2DC \uC2DC\uC791\uD574\uC8FC\uC138\uC694.", Toast.LENGTH_SHORT).show()
                         return@launch
                     }
-                    rootView.postDelayed({
+
+                    val result = verifier.verifyRecordedAudio(capture.audio, SpeakerVerificationConfig.DEFAULT_THRESHOLD)
+                    if (result.accepted) {
+                        Log.i(
+                            SpeakerVerificationConfig.LOG_TAG,
+                            "SV_STT_GATE accepted=true action=startSpeechRecognizerFromRecordedAudio reason=$reason"
+                        )
                         isSpeakerGateInProgress = false
                         setSttGateUiEnabled(true)
-                        sttManager?.startListening()
-                    }, MIC_RELEASE_TO_STT_DELAY_MS)
-                } else {
-                    Log.i(
-                        SpeakerVerificationConfig.LOG_TAG,
-                        "SV_STT_GATE accepted=false action=blocked reason=$reason"
-                    )
-                    Toast.makeText(requireContext(), "\uB4F1\uB85D\uB41C \uC0AC\uC6A9\uC790 \uC74C\uC131\uC774 \uC544\uB2D9\uB2C8\uB2E4.", Toast.LENGTH_SHORT).show()
+                        Log.i(TAG, "VOICE_DIAG_STT_GATE_ACCEPTED_RECORDED reason=$reason elapsedMs=${System.currentTimeMillis() - gateRequestAtMs}")
+                        val consumed = sttManager?.startListeningFromAudio(capture.audio) == true
+                        if (!consumed) {
+                            Log.w(TAG, "VOICE_DIAG_STT_RECORDED_UNSUPPORTED_FALLBACK_LIVE reason=$reason")
+                            sttManager?.startListeningWithoutBeep()
+                        }
+                    } else {
+                        Log.i(
+                            SpeakerVerificationConfig.LOG_TAG,
+                            "SV_STT_GATE accepted=false action=blocked reason=$reason"
+                        )
+                        Toast.makeText(requireContext(), "\uB4F1\uB85D\uB41C \uC0AC\uC6A9\uC790 \uC74C\uC131\uC774 \uC544\uB2D9\uB2C8\uB2E4.", Toast.LENGTH_SHORT).show()
+                        voiceFlowController?.notifySttEnded()
+                        isSpeakerGateInProgress = false
+                        setSttGateUiEnabled(true)
+                    }
+                } catch (e: Exception) {
+                    Log.e(SpeakerVerificationConfig.LOG_TAG, "SV_STT_GATE_FAILED", e)
+                    Toast.makeText(requireContext(), "\uD654\uC790 \uAC80\uC99D\uC744 \uC2E4\uD589\uD558\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4.", Toast.LENGTH_SHORT).show()
                     voiceFlowController?.notifySttEnded()
                     isSpeakerGateInProgress = false
                     setSttGateUiEnabled(true)
                 }
-            } catch (e: Exception) {
-                Log.e(SpeakerVerificationConfig.LOG_TAG, "SV_STT_GATE_FAILED", e)
-                Toast.makeText(requireContext(), "\uD654\uC790 \uAC80\uC99D\uC744 \uC2E4\uD589\uD558\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4.", Toast.LENGTH_SHORT).show()
-                voiceFlowController?.notifySttEnded()
-                isSpeakerGateInProgress = false
-                setSttGateUiEnabled(true)
             }
         }
     }
@@ -529,7 +570,7 @@ class HomeFragment : Fragment() {
             return
         }
         val target = pendingSearchTarget ?: return
-        if (ttsManager?.isReady() == true) {
+        if (ttsFeedbackController.isReady() == true) {
             pendingSearchTarget = null
             startDetectionWithTarget(target)
             return
@@ -571,13 +612,7 @@ class HomeFragment : Fragment() {
      * onDone은 마지막 인자로 두어 trailing lambda 사용 가능. */
     private fun speak(text: String, urgent: Boolean = true, isAutoGuidance: Boolean = true, onDone: (() -> Unit)? = null) {
         if (!viewLifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) return
-        if (isAutoGuidance && (voiceFlowController?.isInSttBreathingRoom() == true)) return
-        if (!urgent && (waitingForTouchConfirm || touchConfirmInProgress || (sttManager?.isListening() == true))) return
-        if (urgent) {
-            ttsManager?.speak(text, android.speech.tts.TextToSpeech.QUEUE_FLUSH, onDone)
-        } else {
-            ttsGuidanceQueue?.enqueue(text, TtsPriorityQueue.PRIORITY_NORMAL)
-        }
+        ttsFeedbackController.speak(text, urgent, isAutoGuidance, onDone)
     }
 
     /** 완전 무결점 초기화(Kill-All Reset). 탭 전환·TOUCH_CONFIRM 긍정 종료 시 호출. */
@@ -586,10 +621,12 @@ class HomeFragment : Fragment() {
         pendingSearchTargetPostTime = 0L
         _binding?.startOverlay?.visibility = View.VISIBLE
         searchState = SearchState.IDLE
+        guidanceStateMachine.reset()
+        verifyHeldItemFlow.reset()
         currentTargetLabel.set("")
         proximityModeActive = false
-        ttsGuidanceQueue?.clear()
-        ttsManager?.stop()
+        ttsFeedbackController.clear()
+        ttsFeedbackController.stop()
         sttManager?.cancelListening()
         isSpeakerGateInProgress = false
         setSttGateUiEnabled(true)
@@ -601,6 +638,7 @@ class HomeFragment : Fragment() {
         scanHandler.removeCallbacksAndMessages(null)
         voiceSearchTargetLabel = null
         ttsDetectedPlayed = false
+        lastCandidateFeedbackTimeMs = 0L
         hasPlayedTargetLockFeedbackThisSearchSession = false
         isTargetLockFeedbackPlaying = false
         ttsGrabPlayed = false
@@ -622,7 +660,6 @@ class HomeFragment : Fragment() {
         validationFailCount = 0
         reachDistanceFrameCount = 0
         lastDirectionGuidanceTime = 0L
-        lastActionGuidanceTime = 0L
         lastSearchPingTime = 0L
         lastTargetBox = null
         missedFramesCount = 0
@@ -664,20 +701,45 @@ class HomeFragment : Fragment() {
                 }
             }
         )
+        ttsFeedbackController = TtsFeedbackController(
+            ttsManager = ttsManager!!,
+            shouldDropAutoGuidance = {
+                voiceFlowController?.isInSttBreathingRoom() == true
+            },
+            shouldBlockQueuedGuidance = {
+                waitingForTouchConfirm ||
+                    touchConfirmInProgress ||
+                    sttManager?.isListening() == true
+            }
+        )
         beepFeedbackController = BeepFeedbackController()
         beepFeedbackController.init()
         speakerVerificationManager = SpeakerVerificationManager(requireContext())
+        voiceActivityDetector = VoiceActivityDetector(requireContext())
 
         ttsManager?.init { success ->
             requireActivity().runOnUiThread {
                 if (success) {
-                    ttsGuidanceQueue = ttsManager?.let { TtsPriorityQueue(it) }
                     voiceFlowController = VoiceFlowController(
                         ttsManager = ttsManager!!,
                         onStateChanged = { _, _ -> requireActivity().runOnUiThread { updateVoiceFlowButtons() } },
-                        onRequestStartStt = { requireActivity().runOnUiThread { startSpeakerVerifiedStt(currentSttGateReason()) } },
-                        onStartSearch = { productName -> requireActivity().runOnUiThread { onStartSearchFromVoiceFlow(productName) } },
-                        onProductNameEntered = { spoken -> resolveSpokenProductThenConfirmVoice(spoken) }
+                        onRequestStartStt = {
+                            requireActivity().runOnUiThread {
+                                val reason = currentSttGateReason()
+                                Log.i(TAG, "VOICE_DIAG_REQUEST_STT state=${voiceFlowController?.currentState} reason=$reason waitingTouch=$waitingForTouchConfirm")
+                                startSpeakerVerifiedStt(reason)
+                            }
+                        },
+                        onStartSearch = { productName ->
+                            requireActivity().runOnUiThread {
+                                Log.i(TAG, "VOICE_DIAG_START_SEARCH productName=$productName state=${voiceFlowController?.currentState}")
+                                onStartSearchFromVoiceFlow(productName)
+                            }
+                        },
+                        onProductNameEntered = { spoken ->
+                            Log.i(TAG, "VOICE_DIAG_PRODUCT_NAME_ENTERED spoken=$spoken state=${voiceFlowController?.currentState}")
+                            resolveSpokenProductThenConfirmVoice(spoken)
+                        }
                     )
                     voiceFlowController?.start()
                     tryStartDetectionWithPendingTarget()
@@ -689,6 +751,7 @@ class HomeFragment : Fragment() {
             context = requireContext(),
             onResult = { text ->
                 requireActivity().runOnUiThread {
+                    Log.i(TAG, "VOICE_DIAG_STT_RESULT text=$text state=${voiceFlowController?.currentState} waitingTouch=$waitingForTouchConfirm touchConfirm=$touchConfirmInProgress")
                     if (waitingForTouchConfirm) {
                         waitingForTouchConfirm = false
                         handleTouchConfirmYesNo(text)
@@ -711,6 +774,7 @@ class HomeFragment : Fragment() {
             },
             onError = { msg ->
                 requireActivity().runOnUiThread {
+                    Log.w(TAG, "VOICE_DIAG_STT_ERROR msg=$msg state=${voiceFlowController?.currentState} waitingTouch=$waitingForTouchConfirm")
                     if (waitingForTouchConfirm) {
                         if (System.currentTimeMillis() - touchConfirmAskedTime >= TOUCH_CONFIRM_ANSWER_WAIT_MS) {
                             waitingForTouchConfirm = false
@@ -728,6 +792,7 @@ class HomeFragment : Fragment() {
             onErrorWithCode = { msg, errorCode ->
                 requireActivity().runOnUiThread {
                     val state = voiceFlowController?.currentState
+                    Log.w(TAG, "VOICE_DIAG_STT_ERROR_CODE code=$errorCode msg=$msg state=$state waitingTouch=$waitingForTouchConfirm voiceRetry=$voiceFlowSttRetryCount touchRetry=$touchConfirmSttRetryCount confirmSilentRetry=$voiceConfirmSilentRetryCount")
                     val isNoMatchOrTimeout =
                         errorCode == android.speech.SpeechRecognizer.ERROR_NO_MATCH ||
                             errorCode == android.speech.SpeechRecognizer.ERROR_SPEECH_TIMEOUT
@@ -888,7 +953,10 @@ class HomeFragment : Fragment() {
 
     private fun onStartSearchFromVoiceFlow(productName: String) {
         viewLifecycleOwner.lifecycleScope.launch {
+            val startedAtMs = System.currentTimeMillis()
+            Log.i(TAG, "VOICE_DIAG_START_SEARCH_REQUEST spoken=$productName")
             val targetClass = mapSpokenToClass(productName)
+            Log.i(TAG, "VOICE_DIAG_START_SEARCH_MAPPED spoken=$productName targetClass=$targetClass elapsedMs=${System.currentTimeMillis() - startedAtMs}")
             if (productName.isNotBlank() && targetClass.isBlank()) {
                 voiceSearchTargetLabel = null
                 val failReason = "인식된 말을 상품 목록에서 찾지 못했어요. '$productName'"
@@ -910,15 +978,33 @@ class HomeFragment : Fragment() {
     }
 
     private suspend fun mapSpokenToClass(spoken: String): String {
-        if (spoken.isBlank()) return ""
-        SynonymRepository.findClassByProximity(spoken)?.let { return it }
-        SynonymRepository.findClassByNameWithFallback(spoken)?.let { return it }
-        ProductDictionary.findClassByStt(spoken)?.let { return it }
+        val startedAtMs = System.currentTimeMillis()
+        Log.i(TAG, "VOICE_DIAG_MAP_START spoken=$spoken")
+        if (spoken.isBlank()) {
+            Log.i(TAG, "VOICE_DIAG_MAP_MISS reason=blank elapsedMs=${System.currentTimeMillis() - startedAtMs}")
+            return ""
+        }
+        SynonymRepository.findClassByProximity(spoken)?.let {
+            Log.i(TAG, "VOICE_DIAG_MAP_HIT source=proximity classLabel=$it elapsedMs=${System.currentTimeMillis() - startedAtMs}")
+            return it
+        }
+        ProductDictionary.findClassByStt(spoken)?.let {
+            Log.i(TAG, "VOICE_DIAG_MAP_HIT source=productDictionary classLabel=$it elapsedMs=${System.currentTimeMillis() - startedAtMs}")
+            return it
+        }
+        SynonymRepository.findClassByNameWithFallback(spoken)?.let {
+            Log.i(TAG, "VOICE_DIAG_MAP_HIT source=nameFallback classLabel=$it elapsedMs=${System.currentTimeMillis() - startedAtMs}")
+            return it
+        }
         val s = spoken.trim().lowercase().replace(" ", "")
         for (label in classLabels) {
             val labelNorm = label.lowercase().replace("_", "")
-            if (labelNorm.contains(s) || s.contains(labelNorm.take(3))) return label
+            if (labelNorm.contains(s) || s.contains(labelNorm.take(3))) {
+                Log.i(TAG, "VOICE_DIAG_MAP_HIT source=labelScan classLabel=$label elapsedMs=${System.currentTimeMillis() - startedAtMs}")
+                return label
+            }
         }
+        Log.i(TAG, "VOICE_DIAG_MAP_MISS spoken=$spoken elapsedMs=${System.currentTimeMillis() - startedAtMs}")
         return ""
     }
 
@@ -928,12 +1014,18 @@ class HomeFragment : Fragment() {
     private fun resolveSpokenProductThenConfirmVoice(spoken: String) {
         viewLifecycleOwner.lifecycleScope.launch {
             val trimmed = spoken.trim()
+            val startedAtMs = System.currentTimeMillis()
+            Log.i(TAG, "VOICE_DIAG_CONFIRM_RESOLVE_START spoken=$trimmed")
             val targetClass = mapSpokenToClass(trimmed)
             withContext(Dispatchers.Main.immediate) {
                 if (!isAdded) return@withContext
                 val vfc = voiceFlowController ?: return@withContext
-                if (vfc.currentState != VoiceFlowController.VoiceFlowState.RESOLVING_PRODUCT_FOR_CONFIRM) return@withContext
+                if (vfc.currentState != VoiceFlowController.VoiceFlowState.RESOLVING_PRODUCT_FOR_CONFIRM) {
+                    Log.i(TAG, "VOICE_DIAG_CONFIRM_RESOLVE_SKIPPED spoken=$trimmed targetClass=$targetClass state=${vfc.currentState} elapsedMs=${System.currentTimeMillis() - startedAtMs}")
+                    return@withContext
+                }
                 if (trimmed.isNotBlank() && targetClass.isBlank()) {
+                    Log.i(TAG, "VOICE_DIAG_CONFIRM_RESOLVE_UNMAPPED spoken=$trimmed elapsedMs=${System.currentTimeMillis() - startedAtMs}")
                     vfc.resetVoiceFlowAfterUnmappedProduct()
                     val failReason = "인식된 말을 상품 목록에서 찾지 못했어요. '$trimmed'"
                     speak(failReason) { speak(VoicePrompts.PROMPT_PRODUCT_RECOGNITION_FAILED) { } }
@@ -942,6 +1034,7 @@ class HomeFragment : Fragment() {
                 currentTargetLabel.set(targetClass)
                 val displayName = SynonymRepository.getDisplayName(targetClass)
                     ?: if (ProductDictionary.isLoaded()) ProductDictionary.getDisplayNameKo(targetClass) else targetClass
+                Log.i(TAG, "VOICE_DIAG_CONFIRM_RESOLVE_DONE spoken=$trimmed targetClass=$targetClass displayName=$displayName elapsedMs=${System.currentTimeMillis() - startedAtMs}")
                 vfc.speakResolvedProductConfirmation(displayName)
             }
         }
@@ -962,21 +1055,7 @@ class HomeFragment : Fragment() {
             t == "yes" || t == "y"
         val isExplicitNo = t.contains("아니") || t.contains("아직") || t.contains("없어") || t.contains("못 찾") || t == "no" || t == "n"
         when {
-            isYes -> {
-                requireActivity().runOnUiThread {
-                    sttManager?.cancelListening()
-                    // 리셋 완료 전까지 touchConfirmInProgress 유지 → "예" 직후 손 감지로 enterTouchConfirm() 재호출 방지
-                    touchConfirmScheduled = false
-                    waitingForTouchConfirm = false
-                    touchActive = false
-                    touchFrameCount = 0
-                    releaseFrameCount = 0
-                    updateVoiceFlowButtons()
-                    speak(VoicePrompts.PROMPT_FOUND_AND_END, urgent = true, isAutoGuidance = false) {
-                        requireActivity().runOnUiThread { performKillAllResetFromTouch() }
-                    }
-                }
-            }
+            isYes -> startHeldItemVerification()
             isExplicitNo -> resetTouchConfirmAndRetrack()
             else -> speak(VoicePrompts.PROMPT_TOUCH_RESTART, urgent = true, isAutoGuidance = false) {
                 requireActivity().runOnUiThread {
@@ -984,6 +1063,29 @@ class HomeFragment : Fragment() {
                     waitingForTouchConfirm = false
                     updateVoiceFlowButtons()
                     performKillAllResetFromTouch()
+                }
+            }
+        }
+    }
+
+    private fun startHeldItemVerification() {
+        requireActivity().runOnUiThread {
+            sttManager?.cancelListening()
+            waitingForTouchConfirm = false
+            touchConfirmScheduled = true
+            touchActive = false
+            touchFrameCount = 0
+            releaseFrameCount = 0
+            updateVoiceFlowButtons()
+            speak("상품을 집은 뒤 카메라에 비춰주세요.", urgent = true, isAutoGuidance = false) {
+                requireActivity().runOnUiThread {
+                    if (verifyHeldItemFlow.start(lockedTargetLabel)) {
+                        touchConfirmInProgress = false
+                        binding.overlayView.setFrozen(false)
+                        updateVoiceFlowButtons()
+                    } else {
+                        resetTouchConfirmAndRetrack()
+                    }
                 }
             }
         }
@@ -1006,6 +1108,7 @@ class HomeFragment : Fragment() {
     /** '손 닿았나요?'에 부정 답변 시: 쿨다운·롤백 후 4초간 TOUCH_CONFIRM 재진입 락 */
     private fun resetTouchConfirmAndRetrack() {
         requireActivity().runOnUiThread {
+            guidanceStateMachine.verificationFailed()
             sttManager?.cancelListening()
             touchConfirmInProgress = false
             touchConfirmScheduled = false
@@ -1027,6 +1130,7 @@ class HomeFragment : Fragment() {
 
     private fun enterTouchConfirm() {
         if (touchConfirmInProgress) return
+        guidanceStateMachine.startVerification()
         touchConfirmInProgress = true
         touchConfirmScheduled = false
         waitingForTouchConfirm = true
@@ -1188,7 +1292,11 @@ class HomeFragment : Fragment() {
             onTrackingLost = { transitionToSearching() }
         )
         gyroManager.onDeltaYawTooHigh = {
-            requireActivity().runOnUiThread { speak("천천히 움직여주세요", false) }
+            requireActivity().runOnUiThread {
+                if (!isTargetLockFeedbackPlaying && searchState == SearchState.LOCKED) {
+                    speak("천천히 움직여주세요", false)
+                }
+            }
         }
     }
 
@@ -1274,6 +1382,7 @@ class HomeFragment : Fragment() {
             val centerRightBound = 2f / 3f
             val inCenterZone = centerXNorm in centerLeftBound..centerRightBound &&
                 centerYNorm in centerLeftBound..centerRightBound
+            if (!inCenterZone) guidanceStateMachine.targetLocked()
 
             when {
                 centerXNorm < centerLeftBound -> {
@@ -1304,6 +1413,7 @@ class HomeFragment : Fragment() {
                     // 진동+멘트는 두 상황만: ①가운데 맞았을 때 ②가운데 유지한 채 55cm 안으로 들어왔을 때
                     val distanceMm = distMm
                     val justEnteredCenter = !wasInCenterZone
+                    if (justEnteredCenter) guidanceStateMachine.targetCentered()
                     // ① 가운데 맞음: 진동+멘트 한 세트. 55cm 이하면 "손을 뻗어" 한 번만 쓰기 위해 플래그 설정
                     if (justEnteredCenter && now - lastVibrateTimeMs >= VIBRATE_COOLDOWN_MS) {
                         val centerMsg = voiceFlowController?.getCenterDistanceMessage(distMm)
@@ -1425,7 +1535,7 @@ class HomeFragment : Fragment() {
     private fun findTargetMatch(detections: List<OverlayView.DetectionBox>, targetLabel: String): Pair<OverlayView.DetectionBox, String>? {
         val target = targetLabel.trim()
         if (target.isBlank()) return null
-        return detections.mapNotNull { box ->
+        val result = detections.mapNotNull { box ->
             val targetConf = when {
                 box.label.trim().equals(target, ignoreCase = true) -> box.confidence
                 else -> box.topLabels.find { it.first.trim().equals(target, ignoreCase = true) }?.second?.div(100f)
@@ -1436,16 +1546,35 @@ class HomeFragment : Fragment() {
                 Pair(displayBox, box.label)
             } else null
         }.maxByOrNull { (box, _) -> box.rect.width() * box.rect.height() }
+        val now = System.currentTimeMillis()
+        if (searchState == SearchState.SEARCHING && now - lastYoloxMatchDiagLogMs >= YOLOX_DIAG_LOG_INTERVAL_MS) {
+            lastYoloxMatchDiagLogMs = now
+            if (result == null) {
+                val best = detections.maxByOrNull { it.confidence }
+                Log.i(
+                    TAG,
+                    "YOLOX_MATCH_DIAG target=$target result=none detections=${detections.size} best=${best?.label}:${best?.confidence} bestTopLabels=${best?.topLabels?.joinToString("|") { "${it.first}:${it.second}" }} trackingThreshold=$TARGET_TRACKING_CONFIDENCE_THRESHOLD lockThreshold=$TARGET_CONFIDENCE_THRESHOLD"
+                )
+            } else {
+                Log.i(
+                    TAG,
+                    "YOLOX_MATCH_DIAG target=$target result=match matchedConf=${"%.3f".format(result.first.confidence)} actualPrimary=${result.second} detections=${detections.size} belowLock=${result.first.confidence < TARGET_CONFIDENCE_THRESHOLD}"
+                )
+            }
+        }
+        return result
     }
 
     private fun transitionToLocked(box: OverlayView.DetectionBox, imageWidth: Int, imageHeight: Int, actualPrimaryLabel: String? = null, fromTiling: Boolean = false, tilingGridUsed: Int = 2) {
         cancelSearchTimeout()
         requireActivity().runOnUiThread {
             if (searchState == SearchState.LOCKED) return@runOnUiThread
+            Log.i(TAG, "YOLOX_LOCKED target=${box.label} conf=${"%.3f".format(box.confidence)} actualPrimary=$actualPrimaryLabel fromTiling=$fromTiling grid=$tilingGridUsed")
             stopScanning()
             useTilingWhenLocked = fromTiling
             if (fromTiling) tilingGridWhenLocked = tilingGridUsed
             searchState = SearchState.LOCKED
+            guidanceStateMachine.targetLocked()
             lockedTargetLabel = box.label
             val shouldPlayLockFeedback = !hasPlayedTargetLockFeedbackThisSearchSession
             if (shouldPlayLockFeedback) {
@@ -1551,11 +1680,13 @@ class HomeFragment : Fragment() {
             searchObjectNotFoundAnnounced = false
             if (isNewSearchSession) {
                 hasAnnouncedDetectedThisSearchSession = false
+                lastCandidateFeedbackTimeMs = 0L
                 hasPlayedTargetLockFeedbackThisSearchSession = false
                 lastFoundAnnounceLabel = null
             }
             stopPositionAnnounce()
             searchState = SearchState.SEARCHING
+            guidanceStateMachine.startSearching()
             lockedTargetLabel = ""
             pendingLockBox = null
             pendingLockCount = 0
@@ -1575,7 +1706,6 @@ class HomeFragment : Fragment() {
             lastTouchMidpointPx = null
             lastTouchTtsTimeMs = 0L
             lastDirectionGuidanceTime = 0L
-            lastActionGuidanceTime = 0L
             reachDistanceFrameCount = 0
             lastTargetBox = null
             missedFramesCount = 0
@@ -1605,6 +1735,7 @@ class HomeFragment : Fragment() {
                         .filter { it.isNotEmpty() && !it.startsWith("#") }
                 }
             }
+            Log.i(TAG, "YOLOX_LABELS_LOADED count=${classLabels.size}")
         } catch (e: Exception) {
             Log.e(TAG, "classes.txt 로드 실패", e)
             classLabels = emptyList()
@@ -1675,7 +1806,7 @@ class HomeFragment : Fragment() {
 
     private fun initYOLOX() {
         try {
-            val modelFile = loadModelFile("yolox_nano_49cls_float16.tflite")
+            val modelFile = loadModelFile(YOLOX_MODEL_FILE)
             val options = Interpreter.Options()
             try {
                 gpuDelegate = GpuDelegate()
@@ -1689,6 +1820,20 @@ class HomeFragment : Fragment() {
                 requireActivity().runOnUiThread { }
             }
             yoloxInterpreter = Interpreter(modelFile, options)
+            val inputShape = yoloxInterpreter?.getInputTensor(0)?.shape()
+            val outputShape = yoloxInterpreter?.getOutputTensor(0)?.shape()
+            val outputDim = outputShape?.lastOrNull()
+            val expectedDim = if (classLabels.isNotEmpty()) classLabels.size + 5 else null
+            Log.i(
+                TAG,
+                "YOLOX_MODEL_LOADED file=$YOLOX_MODEL_FILE"
+            )
+            Log.i(TAG, "YOLOX_INPUT_SHAPE ${inputShape?.contentToString()}")
+            Log.i(TAG, "YOLOX_OUTPUT_SHAPE ${outputShape?.contentToString()}")
+            Log.i(
+                TAG,
+                "YOLOX_CLASS_COUNT_CHECK labels=${classLabels.size} outputDim=$outputDim expectedDim=$expectedDim"
+            )
         } catch (e: Exception) {
             Log.e(TAG, "YOLOX 초기화 실패", e)
             requireActivity().runOnUiThread { }
@@ -1855,15 +2000,36 @@ class HomeFragment : Fragment() {
             maxOf(output[0][0], output[1][0], output[2][0], output[3][0]) <= 1.5f
         } else true
 
-        val hasObjectness = (boxSize == 85 || boxSize == 58 || boxSize == 55 || boxSize == 54)
+        val expectedObjectnessDim = if (classLabels.isNotEmpty()) classLabels.size + 5 else -1
+        val hasObjectness = boxSize == expectedObjectnessDim || boxSize == 85 || boxSize == 58 || boxSize == 55 || boxSize == 54
         val scoreStart = if (hasObjectness) 5 else 4
         val classCount = (boxSize - scoreStart).coerceAtLeast(1)
+        if (!hasLoggedYoloxClassMismatch && classLabels.isNotEmpty() && classLabels.size != classCount) {
+            hasLoggedYoloxClassMismatch = true
+            Log.w(
+                TAG,
+                "YOLOX_CLASS_COUNT_MISMATCH outputClassCount=$classCount labelCount=${classLabels.size} boxSize=$boxSize"
+            )
+        }
         val useSingleScoreFormat = (numBoxes <= 100 && boxSize >= 5)
         val minConfidenceToShow = when {
             useSingleScoreFormat -> 0.35f
             hasObjectness -> 0.45f
             else -> 0.78f
         }
+        val target = targetLabel?.trim().orEmpty()
+        val targetClassIndex = if (target.isNotBlank()) {
+            classLabels.indexOfFirst { it.trim().equals(target, ignoreCase = true) }
+        } else -1
+        val nowDiagMs = System.currentTimeMillis()
+        val shouldLogParseDiag = target.isNotBlank() &&
+            searchState == SearchState.SEARCHING &&
+            nowDiagMs - lastYoloxParseDiagLogMs >= YOLOX_DIAG_LOG_INTERVAL_MS
+        var bestAnyLabel = ""
+        var bestAnyConfidence = 0f
+        var bestTargetConfidence = 0f
+        var bestTargetTopLabel = ""
+        var acceptedBeforeNms = 0
 
         val candidates = mutableListOf<OverlayView.DetectionBox>()
         for (j in 0 until numBoxes) {
@@ -1897,6 +2063,19 @@ class HomeFragment : Fragment() {
                 .take(3)
             val confidence = topClassIds.firstOrNull()?.second ?: 0f
             val topLabel = topClassIds.firstOrNull()?.let { getClassLabel(it.first) } ?: ""
+            if (confidence > bestAnyConfidence) {
+                bestAnyConfidence = confidence
+                bestAnyLabel = topLabel
+            }
+            if (targetClassIndex in 0 until classCount) {
+                var targetRawScore = classScores[targetClassIndex]
+                if (targetRawScore > 1f || targetRawScore < 0f) targetRawScore = 1f / (1f + exp(-targetRawScore))
+                val targetScore = (objScore * targetRawScore).coerceIn(0f, 1f)
+                if (targetScore > bestTargetConfidence) {
+                    bestTargetConfidence = targetScore
+                    bestTargetTopLabel = topLabel
+                }
+            }
             val minForThis = if (targetLabel != null && topLabel.trim().equals(targetLabel.trim(), ignoreCase = true))
                 TARGET_TRACKING_CONFIDENCE_THRESHOLD else minConfidenceToShow
             if (confidence < minForThis) continue
@@ -1946,6 +2125,7 @@ class HomeFragment : Fragment() {
             }
 
             if (right <= left || bottom <= top) continue
+            acceptedBeforeNms++
             candidates.add(
                 OverlayView.DetectionBox(
                     label = topLabels.firstOrNull()?.first ?: "",
@@ -1955,7 +2135,15 @@ class HomeFragment : Fragment() {
                 )
             )
         }
-        return mergeOverlappingSameLabel(nms(candidates, 0.6f))
+        val merged = mergeOverlappingSameLabel(nms(candidates, 0.6f))
+        if (shouldLogParseDiag) {
+            lastYoloxParseDiagLogMs = nowDiagMs
+            Log.i(
+                TAG,
+                "YOLOX_PARSE_DIAG target=$target boxes=$numBoxes boxSize=$boxSize objectness=$hasObjectness classCount=$classCount labelCount=${classLabels.size} acceptedBeforeNms=$acceptedBeforeNms accepted=${merged.size} bestAny=$bestAnyLabel:${"%.3f".format(bestAnyConfidence)} targetClassIndex=$targetClassIndex bestTarget=${"%.3f".format(bestTargetConfidence)} bestTargetTopLabel=$bestTargetTopLabel trackingThreshold=$TARGET_TRACKING_CONFIDENCE_THRESHOLD lockThreshold=$TARGET_CONFIDENCE_THRESHOLD showThreshold=$minConfidenceToShow"
+            )
+        }
+        return merged
     }
 
     private fun nms(boxes: List<OverlayView.DetectionBox>, iouThreshold: Float): List<OverlayView.DetectionBox> {
@@ -2235,6 +2423,51 @@ class HomeFragment : Fragment() {
                 return
             }
             var inferMs = System.currentTimeMillis() - startTime
+            if (verifyHeldItemFlow.currentState != VerifyHeldItemFlow.State.IDLE) {
+                if (verifyHeldItemFlow.currentState == VerifyHeldItemFlow.State.VERIFYING) {
+                    val detections = runYOLOXSingle(bitmap)
+                    inferMs = System.currentTimeMillis() - startTime
+                    val detected = detections.maxByOrNull {
+                        it.rect.width() * it.rect.height()
+                    }
+                    val result = verifyHeldItemFlow.onDetection(
+                        detectedLabel = detected?.label,
+                        confidence = detected?.confidence ?: 0f
+                    )
+                    displayResults(detections, inferMs, w, h)
+                    when (result) {
+                        VerifyHeldItemFlow.VerificationResult.SUCCESS -> {
+                            requireActivity().runOnUiThread {
+                                guidanceStateMachine.complete()
+                                hapticFeedbackController.playVerifySuccess()
+                                touchConfirmScheduled = false
+                                speak(VoicePrompts.PROMPT_VERIFY_SUCCESS, urgent = true, isAutoGuidance = false) {
+                                    requireActivity().runOnUiThread {
+                                        performKillAllResetFromTouch()
+                                    }
+                                }
+                            }
+                        }
+                        VerifyHeldItemFlow.VerificationResult.FAILURE -> {
+                            requireActivity().runOnUiThread {
+                                guidanceStateMachine.verificationFailed()
+                                hapticFeedbackController.playVerifyFailure()
+                                speak(VoicePrompts.PROMPT_VERIFY_FAILURE, urgent = true, isAutoGuidance = false) {
+                                    view?.postDelayed({
+                                        if (verifyHeldItemFlow.currentState == VerifyHeldItemFlow.State.FAILURE) {
+                                            guidanceStateMachine.startVerification()
+                                            verifyHeldItemFlow.start(lockedTargetLabel)
+                                        }
+                                    }, 3000L)
+                                }
+                            }
+                        }
+                        VerifyHeldItemFlow.VerificationResult.PENDING -> Unit
+                    }
+                }
+                imageProxy.close()
+                return
+            }
 
             if (searchState == SearchState.LOCKED) {
                 sendFrameToHands(bitmap, imageProxy.imageInfo.timestamp)
@@ -2258,6 +2491,7 @@ class HomeFragment : Fragment() {
                                 else {
                                     if (lastTier1NoMatchTimeMs == 0L) lastTier1NoMatchTimeMs = nowMs
                                     if (nowMs - lastTier1NoMatchTimeMs >= ESCALATE_TO_TIER2_AFTER_MS) {
+                                        Log.i(TAG, "YOLOX_SEARCH_TIER_CHANGE target=$targetLabel from=1 to=2 noMatchMs=${nowMs - lastTier1NoMatchTimeMs}")
                                         searchTilingTier = 2
                                         lastTier2NoMatchTimeMs = 0L
                                     }
@@ -2278,10 +2512,14 @@ class HomeFragment : Fragment() {
                                 if (result == null) {
                                     if (lastTier2NoMatchTimeMs == 0L) lastTier2NoMatchTimeMs = nowMs
                                     if (nowMs - lastTier2NoMatchTimeMs >= ESCALATE_TO_TIER3_AFTER_MS) {
+                                        Log.i(TAG, "YOLOX_SEARCH_TIER_CHANGE target=$targetLabel from=2 to=3 noMatchMs=${nowMs - lastTier2NoMatchTimeMs}")
                                         searchTilingTier = 3
                                         searchFrameCountInTier3 = 0
                                     }
                                 } else if (!fromTiling) {
+                                    if (searchTilingTier != 1) {
+                                        Log.i(TAG, "YOLOX_SEARCH_TIER_CHANGE target=$targetLabel from=$searchTilingTier to=1 reason=full_frame_match")
+                                    }
                                     searchTilingTier = 1
                                     lastTier1NoMatchTimeMs = 0L
                                 }
@@ -2313,17 +2551,43 @@ class HomeFragment : Fragment() {
                             lastSearchNoDetectionStartMs = 0L
                             searchObjectNotFoundAnnounced = false
                             val (matched, actualPrimaryLabel) = matchRes
+                            Log.i(TAG, "YOLOX_SEARCH_MATCH target=$targetLabel conf=${"%.3f".format(matched.confidence)} actualPrimary=$actualPrimaryLabel tier=$searchTilingTier fromTiling=$fromTilingRes grid=$tilingGridUsedRes lockThreshold=$TARGET_CONFIDENCE_THRESHOLD trackingThreshold=$TARGET_TRACKING_CONFIDENCE_THRESHOLD")
                             pendingLockMissCount = 0
                             if (matched.confidence >= TARGET_CONFIDENCE_THRESHOLD) {
+                                guidanceStateMachine.candidateDetected()
+                                val nowCandidate = System.currentTimeMillis()
+                                if (nowCandidate - lastCandidateFeedbackTimeMs >= CANDIDATE_FEEDBACK_COOLDOWN_MS) {
+                                    Log.i(TAG, "VOICE_DIAG_FEEDBACK_CANDIDATE_DETECTED target=$targetLabel conf=${"%.3f".format(matched.confidence)} cooldownMs=$CANDIDATE_FEEDBACK_COOLDOWN_MS")
+                                    lastCandidateFeedbackTimeMs = nowCandidate
+                                    hapticFeedbackController.playCandidateDetected()
+                                    requireActivity().runOnUiThread {
+                                        speak(
+                                            VoicePrompts.PROMPT_CANDIDATE_DETECTED,
+                                            urgent = false,
+                                            isAutoGuidance = false
+                                        )
+                                    }
+                                } else {
+                                    Log.i(TAG, "VOICE_DIAG_FEEDBACK_SUPPRESSED reason=candidate_cooldown target=$targetLabel elapsedMs=${nowCandidate - lastCandidateFeedbackTimeMs} cooldownMs=$CANDIDATE_FEEDBACK_COOLDOWN_MS")
+                                }
                                 val prev = pendingLockBox
-                                val sameTarget = prev != null && prev.label == matched.label &&
-                                    iou(matched.rect, prev.rect) >= PENDING_LOCK_IOU_THRESHOLD
+                                val movementNorm = if (prev != null) {
+                                    val dx = (matched.rect.centerX() - prev.rect.centerX()) / w.coerceAtLeast(1)
+                                    val dy = (matched.rect.centerY() - prev.rect.centerY()) / h.coerceAtLeast(1)
+                                    sqrt(dx * dx + dy * dy)
+                                } else {
+                                    Float.MAX_VALUE
+                                }
+                                val sameTarget = prev != null &&
+                                    prev.label == matched.label &&
+                                    iou(matched.rect, prev.rect) >= PENDING_LOCK_IOU_THRESHOLD &&
+                                    movementNorm <= TARGET_LOCK_MAX_MOVEMENT_NORM
                                 if (sameTarget) {
                                     pendingLockCount++
                                     val nowLock = System.currentTimeMillis()
                                     val stableDurationMs = if (pendingLockStableSinceMs > 0L) nowLock - pendingLockStableSinceMs else 0L
                                     if (pendingLockCount >= LOCK_CONFIRM_FRAMES &&
-                                        stableDurationMs >= POSITION_ANNOUNCE_STABILITY_MS) {
+                                        stableDurationMs >= TARGET_LOCK_STABILITY_MS) {
                                         pendingLockBox = null
                                         pendingLockCount = 0
                                         pendingLockMissCount = 0
@@ -2345,10 +2609,13 @@ class HomeFragment : Fragment() {
                                     pendingLockCount = 1
                                     pendingLockStableSinceMs = System.currentTimeMillis()
                                 }
+                            } else {
+                                Log.i(TAG, "YOLOX_SEARCH_MATCH_BELOW_LOCK target=$targetLabel conf=${"%.3f".format(matched.confidence)} lockThreshold=$TARGET_CONFIDENCE_THRESHOLD tier=$searchTilingTier fromTiling=$fromTilingRes grid=$tilingGridUsedRes")
                             }
                         } else {
                             pendingLockMissCount++
                             if (pendingLockMissCount >= PENDING_LOCK_MAX_MISS_FRAMES) {
+                                guidanceStateMachine.startSearching()
                                 pendingLockBox = null
                                 pendingLockCount = 0
                                 pendingLockMissCount = 0
@@ -2358,15 +2625,21 @@ class HomeFragment : Fragment() {
                             if (lastSearchNoDetectionStartMs == 0L) lastSearchNoDetectionStartMs = nowPing
                             if (!searchObjectNotFoundAnnounced && (nowPing - lastSearchNoDetectionStartMs >= SEARCH_OBJECT_NOT_FOUND_ANNOUNCE_MS)) {
                                 searchObjectNotFoundAnnounced = true
+                                Log.i(TAG, "VOICE_DIAG_SEARCH_FEEDBACK_NOT_FOUND target=$targetLabel noMatchMs=${nowPing - lastSearchNoDetectionStartMs}")
                                 requireActivity().runOnUiThread {
                                     speak("상품이 보이지 않습니다. 주변을 확인하기 위해 핸드폰을 옆으로 천천히 움직여보세요.", false)
                                 }
                             }
                             if (nowPing - lastSearchPingTime >= SEARCH_PING_INTERVAL_MS) {
+                                Log.i(TAG, "VOICE_DIAG_SEARCH_FEEDBACK_PING target=$targetLabel intervalMs=$SEARCH_PING_INTERVAL_MS")
                                 requireActivity().runOnUiThread {
                                     lastSearchPingTime = System.currentTimeMillis()
                                     speak("천천히 주변을 더 넓게 비춰보세요", false)
                                 }
+                            }
+                            if (nowPing - lastYoloxSearchDiagLogMs >= YOLOX_DIAG_LOG_INTERVAL_MS) {
+                                lastYoloxSearchDiagLogMs = nowPing
+                                Log.i(TAG, "YOLOX_SEARCH_NO_MATCH target=$targetLabel tier=$searchTilingTier combined=${combined.size} pendingMiss=$pendingLockMissCount noMatchMs=${if (lastSearchNoDetectionStartMs == 0L) 0L else nowPing - lastSearchNoDetectionStartMs}")
                             }
                         }
                         displayResults(filterDetectionsByTarget(combined, targetLabel), inferMs, w, h)
@@ -2569,6 +2842,7 @@ class HomeFragment : Fragment() {
 
     companion object {
         private const val TAG = "GrabIT_Home"
+        private const val YOLOX_MODEL_FILE = "yolox_nano_retail_640_balanced_split_fp16.tflite"
         private const val MIC_RELEASE_TO_STT_DELAY_MS = 150L
     }
 }

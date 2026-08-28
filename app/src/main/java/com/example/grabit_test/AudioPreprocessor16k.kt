@@ -72,7 +72,7 @@ class AudioPreprocessor16k(private val context: Context) {
             recorder.release()
         }
 
-        val floats = FloatArray(TitaNetOnnxRunner.FIXED_SAMPLE_COUNT)
+        val floats = FloatArray(maxOf(sampleCount, TitaNetOnnxRunner.FIXED_SAMPLE_COUNT))
         val copyLength = minOf(offset, floats.size)
         for (i in 0 until copyLength) {
             floats[i] = (pcm[i] / 32768.0f).coerceIn(-1f, 1f)

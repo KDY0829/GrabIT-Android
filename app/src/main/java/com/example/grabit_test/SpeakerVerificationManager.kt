@@ -104,6 +104,40 @@ class SpeakerVerificationManager(context: Context) : AutoCloseable {
         result
     }
 
+    suspend fun verifyRecordedAudio(
+        audio: AudioPreprocessor16k.RecordedAudio,
+        threshold: Float = DEFAULT_THRESHOLD
+    ): VerificationResult = withContext(Dispatchers.Default) {
+        val totalStartedAt = SystemClock.elapsedRealtime()
+        val voiceprint = store.load()
+            ?: return@withContext VerificationResult(
+                accepted = false,
+                score = Float.NaN,
+                threshold = threshold,
+                reason = "voiceprint_not_enrolled",
+                recordingDurationMs = audio.durationMs,
+                preprocessMs = audio.preprocessMs,
+                inferenceMs = 0L,
+                totalMs = SystemClock.elapsedRealtime() - totalStartedAt,
+                voiceprintRegistered = false
+            )
+        val result = verifyPcm(
+            pcm16kMonoFloat = audio.pcm16kMonoFloat,
+            voiceprint = voiceprint,
+            threshold = threshold,
+            validSamples = audio.capturedSamples,
+            recordingDurationMs = audio.durationMs,
+            preprocessMs = audio.preprocessMs,
+            totalStartedAtMs = totalStartedAt
+        )
+        Log.i(
+            SpeakerVerificationConfig.LOG_TAG,
+            "SV_VERIFY_RECORDED similarity=${result.score} threshold=${result.threshold} accepted=${result.accepted} " +
+                "preprocessMs=${result.preprocessMs} inferenceMs=${result.inferenceMs} totalMs=${result.totalMs}"
+        )
+        result
+    }
+
     fun verifyPcm(
         pcm16kMonoFloat: FloatArray,
         voiceprint: FloatArray = requireNotNull(store.load()) { "Voiceprint is not enrolled." },

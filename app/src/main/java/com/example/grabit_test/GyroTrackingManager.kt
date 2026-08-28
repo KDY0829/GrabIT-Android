@@ -242,14 +242,6 @@ class GyroTrackingManager(
 
         lastDeltaYawRad = deltaYaw
         lastDeltaPitchRad = deltaPitch
-        if (kotlin.math.abs(deltaYaw) >= DELTA_YAW_FAST_THRESHOLD_RAD) {
-            val nowMs = System.currentTimeMillis()
-            if (nowMs - lastDeltaYawTooHighInvokedMs >= DELTA_YAW_TOO_HIGH_COOLDOWN_MS) {
-                lastDeltaYawTooHighInvokedMs = nowMs
-                onDeltaYawTooHigh?.invoke()
-            }
-        }
-
         val deltaRollDegrees = Math.toDegrees(deltaRoll.toDouble()).toFloat()
         smoothedRollDegrees += (deltaRollDegrees - smoothedRollDegrees) * SMOOTHING_ALPHA
 
@@ -272,6 +264,13 @@ class GyroTrackingManager(
             distanceY = 0f
             lastTimestampAccel = 0L
             return
+        }
+        if (kotlin.math.abs(deltaYaw) >= DELTA_YAW_FAST_THRESHOLD_RAD) {
+            val nowMs = System.currentTimeMillis()
+            if (nowMs - lastDeltaYawTooHighInvokedMs >= DELTA_YAW_TOO_HIGH_COOLDOWN_MS) {
+                lastDeltaYawTooHighInvokedMs = nowMs
+                onDeltaYawTooHigh?.invoke()
+            }
         }
 
         val rotationShiftX = -deltaYaw * pixelsPerRadianX * SENSITIVITY_FACTOR

@@ -71,6 +71,7 @@ class VoiceFlowController(
 
     /** 화면 터치 후 호출: 찾으시는 상품을 말씀해주세요 → STT 시작 (STT에서 "삐 소리가 나면 말씀해주세요" + 삐 재생) */
     fun startProductNameInput() {
+        Log.i(TAG, "VOICE_FLOW_START_PRODUCT_INPUT state=$currentState")
         transitionTo(VoiceFlowState.WAITING_PRODUCT_NAME)
         speak(MSG_ASK_PRODUCT) {
             onRequestStartStt()
@@ -79,6 +80,7 @@ class VoiceFlowController(
 
     /** 볼륨 다운 길게 누르기: 상태 변경 없이 재생 중 TTS만 스킵하고 STT만 시작 */
     fun requestSttOnly() {
+        Log.i(TAG, "VOICE_FLOW_REQUEST_STT_ONLY state=$currentState")
         onRequestStartStt()
     }
 
@@ -86,6 +88,7 @@ class VoiceFlowController(
     fun onSttResult(text: String) {
         val normalized = text.trim()
         if (normalized.isBlank()) return
+        Log.i(TAG, "VOICE_FLOW_STT_RESULT state=$currentState text=$normalized")
 
         when (currentState) {
             VoiceFlowState.WAITING_PRODUCT_NAME -> handleProductNameReceived(normalized)
@@ -115,6 +118,7 @@ class VoiceFlowController(
     }
 
     private fun handleProductNameReceived(text: String) {
+        Log.i(TAG, "VOICE_FLOW_PRODUCT_RECEIVED text=$text state=$currentState")
         when {
             isHelpCommand(text) -> speakHelp()
             isRepeatCommand(text) -> repeatLast()
@@ -132,6 +136,7 @@ class VoiceFlowController(
      */
     fun speakResolvedProductConfirmation(displayNameForUser: String) {
         if (currentState != VoiceFlowState.RESOLVING_PRODUCT_FOR_CONFIRM) return
+        Log.i(TAG, "VOICE_FLOW_CONFIRM_ASK displayName=$displayNameForUser")
         transitionTo(VoiceFlowState.CONFIRM_PRODUCT)
         val msg = msgConfirmProduct(displayNameForUser)
         speak(msg) {
@@ -156,6 +161,7 @@ class VoiceFlowController(
 
         if (isYes) {
             branchChosen = "YES"
+            Log.i(TAG, "VOICE_FLOW_CONFIRM_RESULT text=$normalized isYes=true branch=$branchChosen target=$currentTargetSnapshot")
             transitionTo(VoiceFlowState.SEARCHING_PRODUCT)
             val msg = msgSearching(currentProductName)
             speak(msg)
@@ -163,6 +169,7 @@ class VoiceFlowController(
             startSearchCalled = true
         } else {
             branchChosen = "NON_YES_RESET"
+            Log.i(TAG, "VOICE_FLOW_CONFIRM_RESULT text=$normalized isYes=false branch=$branchChosen target=$currentTargetSnapshot")
             resetToAppStartWithRestartPrompt()
         }
 
@@ -239,6 +246,7 @@ class VoiceFlowController(
         imageHeight: Int = 0,
         confidencePercent: Int? = null
     ) {
+        Log.i(TAG, "VOICE_FLOW_SEARCH_COMPLETE success=$success detectedClass=$detectedClass confidencePercent=$confidencePercent state=$currentState")
         if (success) {
             transitionTo(VoiceFlowState.SEARCH_RESULT)
             // 위치/거리 안내는 HomeFragment transitionToLocked에서 이미 재생함. 중복 제거.
@@ -396,10 +404,12 @@ class VoiceFlowController(
 
     private fun speak(text: String, onDone: (() -> Unit)? = null) {
         lastSpokenText = text
+        Log.i(TAG, "VOICE_FLOW_SPEAK_REQUEST state=$currentState text=$text")
         ttsManager.speak(text, TextToSpeech.QUEUE_FLUSH, onDone)
     }
 
     private fun transitionTo(state: VoiceFlowState) {
+        val prevState = currentState
         currentState = state
         isNextStepVoiceInput = when (state) {
             VoiceFlowState.WAITING_PRODUCT_NAME,
@@ -421,6 +431,7 @@ class VoiceFlowController(
             VoiceFlowState.SEARCH_RESULT -> "탐색 결과"
             VoiceFlowState.SEARCH_FAILED -> "탐색 실패"
         }
+        Log.i(TAG, "VOICE_FLOW_STATE from=$prevState to=$state nextVoiceInput=$isNextStepVoiceInput")
         onStateChanged(state, stateLabel)
     }
 
