@@ -9,7 +9,7 @@
 <table align="center">
   <tr>
     <td align="center" width="680">
-      <a href="https://app.notion.com/p/377441f66d7880a6bf29fae9e4a5624e"><b>📘 Notion Portfolio</b></a><br />
+      <a href="https://app.notion.com/p/_-377441f66d7880a6bf29fae9e4a5624e?source=copy_link"><b>📘 Notion Portfolio</b></a><br />
       <sub>프로젝트 배경 · 기술 선택 · 구현 과정 · 공공데이터 활용 · 수상 성과</sub>
     </td>
   </tr>
@@ -238,30 +238,28 @@ STT 결과
 ┌──────────────────── Android ────────────────────┐
 │                                                 │
 │  AudioRecord → VAD → TitaNet-S → SpeechRecognizer
-│                            │                    │
-│                            ▼                    │
-│                Local product / synonym search  │
-│                            │                    │
-│  CameraX → YOLOX-Nano → Optical Flow           │
-│                  │              │               │
-│                  └──── target position ───┐     │
-│  MediaPipe Hands ───── hand position ─────┤     │
-│                                           ▼     │
-│                               Guidance Engine   │
-│                               TTS / Beep / Haptic│
-└───────────────────────┬─────────────────────────┘
-                        │ local miss only
-                        ▼
-┌──────────────────── Backend ────────────────────┐
-│ Node.js / Express → FastAPI E5 → MongoDB        │
-│ 상품명 · 유사어 · 규격정보 검색/관리            │
+│                          ↓
+│                 Local Product Dictionary
+│                          ↓ no match
+│                     E5 API fallback
+│                                                 │
+│  CameraX → YOLOX-Nano → Optical Flow            │
+│                         ↓                       │
+│                 Direction / Distance            │
+│                         ↓                       │
+│               MediaPipe Hands                   │
+│                         ↓                       │
+│               TTS / Beep / Haptic               │
 └─────────────────────────────────────────────────┘
+                         │
+                         ▼
+             Node.js / FastAPI / MongoDB
 ```
 
 ### 설계 포인트
 
-1. **핵심 비전 추론은 온디바이스** — 카메라 영상을 외부 서버에 전달하지 않고 상품 탐지와 손 추적을 기기에서 수행합니다.
-2. **상품 검색은 로컬 우선** — 등록 상품은 즉시 로컬에서 매칭하고 미등록 표현만 E5 서버를 사용합니다.
+1. **비전 추론은 온디바이스** — 실시간 카메라 프레임을 서버로 보내지 않습니다.
+2. **검색은 로컬 우선** — 등록된 상품명·별칭은 기기 내부에서 해결하고 서버는 fallback으로 사용합니다.
 3. **탐지와 추적을 분리** — YOLOX가 상품을 재탐지하고 Optical Flow가 프레임 사이 위치 연속성을 보완합니다.
 4. **화자검증과 STT를 분리** — TitaNet-S는 음성을 텍스트로 변환하는 모델이 아니라 등록 사용자 여부를 판단하는 gate로 사용합니다.
 
@@ -273,12 +271,10 @@ STT 결과
 - PyTorch 모델을 TensorFlow Lite / LiteRT FP16 배포 형태로 변환
 - Android CameraX 기반 온디바이스 추론 흐름 연결
 - Optical Flow 기반 상품 위치 추적 및 탐지 안정화
-- MediaPipe Hands와 상품 bounding box를 결합한 접근 피드백 설계
-- TitaNet-S 기반 화자검증 후보 비교 및 Android ONNX Runtime 적용
-- 화자 등록 / voiceprint / cosine similarity / STT gate 흐름 구현 및 검증
-- STT/TTS/비프음/진동 기반 접근성 UX 흐름 정리
-- Local-first 상품명·별칭 검색과 E5 semantic search fallback 연동
-- Node.js / FastAPI / MongoDB 기반 상품 검색·규격 API 연동
+- MediaPipe Hands 결과와 상품 bbox를 활용한 접근 피드백 설계
+- STT/TTS 기반 접근성 UX 흐름 정리
+- TitaNet-S 기반 화자검증 흐름의 Android 적용 및 테스트
+- Node.js / FastAPI 기반 유사어 검색 및 상품 규격 API 연동
 - 공공데이터 상품 이미지 선별, bounding box 재보정 및 학습 데이터 품질 개선
 - KDT 프로젝트를 공모전 시제품으로 고도화하고 기술 구조·시연·발표 흐름 정리
 
@@ -291,11 +287,12 @@ STT 결과
 | Android | Kotlin, Android Studio, Coroutines |
 | Architecture | MVVM |
 | Camera | CameraX |
-| On-Device Detection | YOLOX-Nano, TensorFlow Lite, LiteRT |
-| Tracking | Optical Flow, Gyroscope |
+| Object Detection | YOLOX-Nano |
+| On-Device Runtime | TensorFlow Lite, LiteRT |
+| Tracking | Optical Flow |
 | Hand Tracking | MediaPipe Hands |
-| Speaker Verification | TitaNet-S, ONNX Runtime, cosine similarity |
-| Voice | AudioRecord, Android SpeechRecognizer, TextToSpeech |
+| Speaker Verification | TitaNet-S, ONNX Runtime |
+| Voice | AudioRecord, SpeechRecognizer, TextToSpeech |
 | Local DB | Room Database |
 | Backend | Node.js, Express, FastAPI |
 | NLP | intfloat/multilingual-e5-small, cosine similarity |
@@ -313,8 +310,8 @@ GrabIT은 실시간 카메라 추론을 서버에 의존하지 않습니다.
 
 | 구성 | 역할 |
 |---|---|
-| Node.js / Express | 상품 정보, 별칭 검색 요청, 상품 규격 API |
-| FastAPI E5 Service | multilingual-E5 임베딩 생성 및 의미 유사도 계산 |
+| Node.js / Express | 상품 정보, 규격, 유사어 검색 API |
+| FastAPI E5 Service | 텍스트 임베딩 및 cosine similarity 기반 의미 검색 |
 | MongoDB | 상품명, 별칭, 규격 데이터 저장 |
 | Room | 최근 검색기록 및 로컬 상품 관련 데이터 관리 |
 
@@ -326,23 +323,14 @@ GrabIT은 실시간 카메라 추론을 서버에 의존하지 않습니다.
 
 ```bash
 # Android Studio에서 프로젝트 열기
-# Gradle Sync
-# 실제 Android 기기에서 실행 권장
+# Gradle Sync 후 실제 Android 기기에서 실행 권장
 ```
-
-화자검증 실제 기기 테스트:
-
-```bash
-./gradlew :app:compileDebugKotlin
-```
-
-자세한 검증 시나리오는 [`speaker_verification_android_device_test.md`](./speaker_verification_android_device_test.md)를 참고하세요.
 
 ### Backend
 
 ```bash
 cd synonym-api
-docker compose up --build -d
+docker-compose up --build -d
 node seed.js
 node seed-dimensions.js
 ```
@@ -356,34 +344,36 @@ app/
 ├─ src/main/assets/
 │  ├─ yolox_nano_49cls_float16.tflite   # 상품 탐지 모델
 │  ├─ titanet_s.onnx                    # 화자검증 모델
-│  ├─ hand_landmarker.task              # MediaPipe Hands
 │  └─ product_dictionary.json           # 로컬 상품명/별칭
-└─ src/main/java/com/example/grabit_test/
-   ├─ HomeFragment.kt                   # 실시간 탐지/안내 중심 화면
-   ├─ OpticalFlowTracker.kt             # 상품 위치 추적
-   ├─ SpeakerVerificationManager.kt     # 화자검증 관리
-   ├─ TitaNetOnnxRunner.kt              # TitaNet ONNX 추론
-   ├─ VoiceFlowController.kt            # 음성 흐름 / STT gate
-   └─ data/                              # Room / 상품 / synonym data layer
+├─ src/main/java/com/example/grabit_test/
+│  ├─ HomeFragment.kt
+│  ├─ OpticalFlowTracker.kt
+│  ├─ SpeakerVerificationManager.kt
+│  ├─ TitaNetOnnxRunner.kt
+│  ├─ VoiceFlowController.kt
+│  └─ ...
 
 synonym-api/
-├─ server.js                             # Node.js API
-├─ e5-service/                           # FastAPI embedding service
-└─ docker-compose.yml                    # backend orchestration
+├─ server.js                            # Node.js API
+├─ e5-service/                          # FastAPI E5 embedding service
+└─ docker-compose.yml
 
 assets/
 ├─ Award.jpg
 ├─ Panel.jpg
 ├─ Team.jpg
-└─ Grabit.mp4
+├─ Grabit.mp4
+├─ grabit-detection-demo.jpg
+├─ grabit-service-overview.png
+└─ grabit-user-scenario.png
 ```
 
 ---
 
-## 14. Result
+## 14. Outcome
 
-GrabIT은 KDT 팀 프로젝트에서 시작해 공공데이터와 AI 기술을 추가 적용하고 실제 Android 시제품을 고도화했습니다.
+GrabIT은 단순한 학습용 객체 탐지 예제에서 끝나지 않고,
+**실제 Android 앱 안에서 음성 입력 → 상품 검색 → 온디바이스 탐지 → 위치 추적 → 손 접근 확인 → 접근성 피드백**까지 하나의 흐름으로 연결했습니다.
 
-**상품을 인식하는 모델 자체보다, 사용자가 음성으로 원하는 상품을 찾고 → 스마트폰 카메라로 목표를 탐지하고 → 손을 이동해 상품에 접근하는 전체 흐름을 하나의 모바일 서비스로 연결하는 것**을 프로젝트의 핵심 목표로 삼았습니다.
-
-그 결과 **2026 충북 공공데이터·AI 활용 창업경진대회 우수상**을 수상했습니다.
+KDT 팀 프로젝트를 기반으로 공공데이터와 AI 기술을 추가 적용하고 사용 흐름을 고도화한 결과,
+**2026 충북 공공데이터·AI 활용 창업경진대회 우수상**을 수상했습니다.
